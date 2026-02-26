@@ -19,7 +19,7 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT_PATH="$REPO_DIR/sort_screenshots.py"
 PLIST_LABEL="com.screenshot-sorter"
 PLIST_DST="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
-DEFAULT_MODEL="moondream"
+DEFAULT_MODEL="llava"
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -79,6 +79,26 @@ fi
 
 MODEL=$(ask "  Vision model to use" "$DEFAULT_MODEL")
 
+# If the user chose llava (with or without a tag), offer a version picker
+if [[ "$MODEL" == "llava" || "$MODEL" == llava:* ]]; then
+    echo
+    echo "  Which LLaVA variant would you like?"
+    echo "    1) llava:7b   ~4.7 GB  fast, good for most screenshots"
+    echo "    2) llava:13b  ~8.0 GB  better descriptions, slower"
+    echo "    3) llava:34b  ~20  GB  best quality, needs ≥32 GB RAM"
+    echo "    4) llava-phi3 ~2.9 GB  lightweight (Phi-3 base)"
+    echo "    5) Keep '$MODEL' as entered"
+    read -r -p "  Choice [1]: " LLAVA_CHOICE
+    case "${LLAVA_CHOICE:-1}" in
+        2) MODEL="llava:13b" ;;
+        3) MODEL="llava:34b" ;;
+        4) MODEL="llava-phi3" ;;
+        5) ;;   # leave MODEL unchanged
+        *) MODEL="llava:7b" ;;
+    esac
+    echo "  Using model: $MODEL"
+fi
+
 # Check if the model is already pulled (requires ollama to not be serving yet;
 # `ollama list` works without the server running on newer versions)
 if ollama list 2>/dev/null | grep -q "^${MODEL}"; then
@@ -110,6 +130,13 @@ mkdir -p "$INCOMING" "$ARCHIVE"
 echo
 echo "✓ Inbox:   $INCOMING"
 echo "✓ Archive: $ARCHIVE"
+
+echo
+KEEP_ORIGINALS=false
+if confirm "  Keep originals in $INCOMING/processed/ after archiving?"; then
+    KEEP_ORIGINALS=true
+    echo "✓ Originals will be moved to $INCOMING/processed/"
+fi
 
 separator
 
@@ -173,6 +200,7 @@ cat > "$PLIST_DST" <<EOF
         <string>$ARCHIVE</string>
         <string>--model</string>
         <string>$MODEL</string>
+$(if $KEEP_ORIGINALS; then echo "        <string>--keep-originals</string>"; fi)
     </array>
 
 $SCHEDULE_XML
@@ -212,7 +240,11 @@ separator
 
 echo "Done! To run the sorter manually at any time:"
 echo
-echo "  python3 \"$SCRIPT_PATH\" \\"
-echo "    --incoming \"$INCOMING\" \\"
-echo "    --archive  \"$ARCHIVE\""
+MANUAL_CMD="  python3 \"$SCRIPT_PATH\" \\"$'\n'"    --incoming \"$INCOMING\" \\"$'\n'"    --archive  \"$ARCHIVE\" \\"$'\n'"    --model    \"$MODEL\""
+if $KEEP_ORIGINALS; then
+    MANUAL_CMD="$MANUAL_CMD \\"$'\n'"    --keep-originals"
+fi
+echo "$MANUAL_CMD"
+echo
+echo "Add --dry-run to preview renames without moving any files."
 echo

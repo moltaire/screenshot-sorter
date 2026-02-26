@@ -15,7 +15,7 @@ inbox/
           ↓  runs overnight  ↓
 
 archive/
-  2026-02-26_checkerboard-illusion-lecture.png
+  2026-02-26_multi-panel-behavioral-results.png
   2026-02-24_concert-listing-berlin.png
 ```
 
@@ -28,7 +28,7 @@ archive/
 | macOS | LaunchAgent scheduling is macOS-only |
 | Python 3 | Ships with macOS; `python3 --version` to check |
 | [Ollama](https://ollama.com) | Local model runner — installer can set this up |
-| A vision model | Default: `moondream` (fast, ~1.8 GB). Also works with `llava:7b`, `llama3.2-vision`, etc. |
+| A vision model | Default: `llava:7b` (~4.7 GB). See model options below. |
 
 ---
 
@@ -45,10 +45,11 @@ bash install.sh
 The installer will:
 
 1. Check for Python and Ollama (offer to install Ollama via Homebrew if missing)
-2. Pull the vision model if not already present
+2. Ask which vision model to use and pull it if not already present
 3. Ask for your **inbox** and **archive** folder paths
-4. Ask for a schedule (daily or weekly, what time)
-5. Generate and install a macOS LaunchAgent — no further action needed
+4. Ask whether to keep originals after archiving
+5. Ask for a schedule (daily or weekly, what time)
+6. Generate and install a macOS LaunchAgent — no further action needed
 
 After install, point macOS to save screenshots to your inbox:
 **macOS Settings → Keyboard Shortcuts → Screenshots → Save to → [your inbox]**
@@ -68,7 +69,35 @@ Optional flags:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--model` | `moondream` | Any Ollama vision model |
+| `--model` | `llava` | Any Ollama vision model |
+| `--dry-run` | off | Preview renames without moving any files |
+| `--keep-originals` | off | Copy to archive and move originals to `inbox/processed/` |
+
+### `--dry-run`
+
+Runs the full pipeline (starts Ollama, queries the model) but does not move
+or rename anything. Useful for checking what names the model would produce
+before committing.
+
+```bash
+python3 sort_screenshots.py \
+  --incoming ~/Pictures/Screenshots/incoming \
+  --archive  ~/Pictures/Screenshots \
+  --dry-run
+```
+
+### `--keep-originals`
+
+Copies each renamed file to the archive and moves the original (with its
+original filename) to `inbox/processed/`. The originals are preserved but
+won't be re-processed on the next run.
+
+```bash
+python3 sort_screenshots.py \
+  --incoming ~/Pictures/Screenshots/incoming \
+  --archive  ~/Pictures/Screenshots \
+  --keep-originals
+```
 
 ---
 
@@ -93,13 +122,19 @@ bash install.sh   # re-run to apply any changes to the LaunchAgent
 
 ---
 
-## Supported model alternatives
+## Supported models
+
+The installer prompts for a LLaVA variant when you choose the default model.
+You can also pass any Ollama vision model via `--model`.
 
 | Model | Size | Notes |
 |---|---|---|
-| `moondream` | ~1.8 GB | Fast, good for simple captioning |
-| `llava:7b` | ~4 GB | Better descriptions, needs ~8 GB RAM |
-| `llama3.2-vision:11b` | ~8 GB | High quality, needs ~16 GB RAM |
+| `llava:7b` | ~4.7 GB | Default — fast, good for most screenshots |
+| `llava:13b` | ~8.0 GB | Better descriptions, slower |
+| `llava:34b` | ~20 GB | Best quality, needs ≥32 GB RAM |
+| `llava-phi3` | ~2.9 GB | Lightweight alternative |
+| `llama3.2-vision:11b` | ~8 GB | High quality non-LLaVA option |
+| `moondream` | ~1.8 GB | Very fast but produces generic names |
 
 Change model by re-running `install.sh` or editing the LaunchAgent plist at
 `~/Library/LaunchAgents/com.screenshot-sorter.plist`.
