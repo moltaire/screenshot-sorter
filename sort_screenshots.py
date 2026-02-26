@@ -2,18 +2,22 @@
 """
 sort_screenshots.py
 ───────────────────
-Scans an inbox folder for images, asks a local vision model (via Ollama) to
-describe each one, renames it to YYYY-MM-DD_brief-description.ext, and moves
-it to an archive folder.
+Scans an inbox folder for images and renames each one to YYYY-MM-DD_brief-description.ext
+using a three-stage pipeline:
+
+  1. Vision model (Ollama)  — describes image content
+  2. Tesseract OCR          — extracts any text in the image
+  3. Text LLM (Ollama)      — synthesizes both into a concise slug
 
 Starts Ollama if it isn't already running, and stops it again when done
 (unless it was already running before the script started).
 
 Usage:
-    python3 sort_screenshots.py --incoming /path/to/inbox --archive /path/to/archive
-    python3 sort_screenshots.py --incoming /path/to/inbox --archive /path/to/archive --model llava
-    python3 sort_screenshots.py --incoming /path/to/inbox --archive /path/to/archive --dry-run
-    python3 sort_screenshots.py --incoming /path/to/inbox --archive /path/to/archive --keep-originals
+    python3 sort_screenshots.py --inbox /path/to/inbox --archive /path/to/archive
+    python3 sort_screenshots.py --inbox /path/to/inbox --archive /path/to/archive --model llama3.2-vision:11b
+    python3 sort_screenshots.py --inbox /path/to/inbox --archive /path/to/archive --text-model mistral
+    python3 sort_screenshots.py --inbox /path/to/inbox --archive /path/to/archive --dry-run --verbose
+    python3 sort_screenshots.py --inbox /path/to/inbox --archive /path/to/archive --no-ocr
 """
 
 import argparse
@@ -51,47 +55,59 @@ def wait_for_ollama(timeout: int = 30) -> bool:
     return False
 
 
-SYSTEM_PROMPT = (
+# ── Prompts ───────────────────────────────────────────────────────────────────
+
+VISION_SYSTEM = (
+    "You are an image analysis assistant. "
+    "Describe what you see concisely and factually."
+)
+
+VISION_PROMPT = (
+    "Describe the main content of this image in 1-2 sentences. "
+    "Include any visible titles, labels, axis names, or prominent text you can read. "
+    "Be specific. Do not start with 'The image shows' — just describe directly."
+)
+
+SYNTHESIS_SYSTEM = (
     "You are a file-naming assistant. "
     "You only ever output a single hyphenated slug of 3-5 lowercase words. "
     "Never explain, never describe your reasoning, never repeat instructions."
 )
 
-MAIN_PROMPT = (
-    "Output a 3-5 word hyphenated slug describing the main content of this image.\n"
-    "If the image contains a caption, title, or label, use that text as the primary "
-    "basis for the slug — it usually describes the content better than visual inference.\n"
-    "Only describe what you can clearly see. Do not guess or infer content that is not visible.\n\n"
-    "Examples:\n"
-    "  flowchart-data-pipeline\n"
-    "  bar-chart-reaction-times\n"
-    "  github-pull-request-diff\n"
-    "  python-error-traceback\n"
-    "  eeg-frequency-spectrum\n"
-    "  dictator-game-stimulus\n\n"
-    "Slug:"
+SYNTHESIS_PROMPT_TMPL = """\
+Create a 3-5 word hyphenated filename slug for a screenshot.
+
+Visual description: {visual}
+Text found in image (OCR): {ocr}
+
+Rules:
+- Use specific content from titles, labels, or key terms when available
+- Never use generic words like "screenshot", "image", "figure", or "file"
+- Output only the slug, nothing else
+
+Examples: flowchart-data-pipeline, python-error-traceback, eeg-frequency-spectrum,
+dictator-game-stimulus, github-pull-request-diff, bar-chart-reaction-times
+
+Slug:"""
+
+# Fallback: ask the vision model directly for a slug (bypasses synthesis step)
+FALLBACK_SYSTEM = (
+    "You are a file-naming assistant. "
+    "You only ever output a single hyphenated slug of 3-5 lowercase words. "
+    "Never explain, never describe your reasoning, never repeat instructions."
 )
 
 FALLBACK_PROMPT = "3-5 word slug for this image. Only output the slug. Slug:"
 
-# Slugs that indicate the model described the prompt rather than the image
-_BAD_PREFIXES = (
-    "the-image", "this-image", "the-photo", "the-picture",
-    "the-following", "screenshot", "scientific-figures",
-    "i-", "here-is", "sure-", "slug-",
-)
-# Individual words that indicate prompt echo regardless of position
-_BAD_WORDS = {"slug", "hyphenated", "caption"}
 
-# Filler words stripped before truncating so meaningful words aren't crowded out
-_FILLERS = {"a", "an", "the", "of", "in", "on", "at", "to", "for", "and", "or", "with", "from", "by"}
+# ── Ollama API calls ──────────────────────────────────────────────────────────
 
 
-def _call_ollama(b64: str, model: str, prompt: str) -> str:
+def _call_vision(b64: str, model: str, prompt: str, system: str) -> str:
     payload = json.dumps(
         {
             "model": model,
-            "system": SYSTEM_PROMPT,
+            "system": system,
             "prompt": prompt,
             "images": [b64],
             "stream": False,
@@ -102,19 +118,91 @@ def _call_ollama(b64: str, model: str, prompt: str) -> str:
         data=payload,
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=90) as resp:
+    with urllib.request.urlopen(req, timeout=120) as resp:
         return json.loads(resp.read())["response"].strip()
+
+
+def _call_text(model: str, prompt: str, system: str) -> str:
+    payload = json.dumps(
+        {
+            "model": model,
+            "system": system,
+            "prompt": prompt,
+            "stream": False,
+        }
+    ).encode()
+    req = urllib.request.Request(
+        f"{OLLAMA_BASE}/api/generate",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return json.loads(resp.read())["response"].strip()
+
+
+# ── OCR ───────────────────────────────────────────────────────────────────────
+
+
+def extract_text_ocr(path: Path) -> str:
+    """Extract text from an image using Tesseract (eng+deu). Returns '' if unavailable."""
+    try:
+        result = subprocess.run(
+            ["tesseract", str(path), "stdout", "-l", "eng+deu", "--psm", "11"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            # Collapse runs of whitespace; discard near-empty results
+            text = " ".join(result.stdout.split())
+            return text if len(text) > 3 else ""
+        return ""
+    except FileNotFoundError:
+        return ""  # tesseract not installed
+    except subprocess.TimeoutExpired:
+        return ""
+
+
+# ── Slug helpers ──────────────────────────────────────────────────────────────
+
+_BAD_PREFIXES = (
+    "the-image",
+    "this-image",
+    "the-photo",
+    "the-picture",
+    "the-following",
+    "screenshot",
+    "scientific-figures",
+    "i-",
+    "here-is",
+    "sure-",
+    "slug-",
+)
+_BAD_WORDS = {"slug", "hyphenated", "caption"}
+_FILLERS = {
+    "a",
+    "an",
+    "the",
+    "of",
+    "in",
+    "on",
+    "at",
+    "to",
+    "for",
+    "and",
+    "or",
+    "with",
+    "from",
+    "by",
+}
 
 
 def _to_slug(raw: str) -> str:
     """Sanitise raw model output to a clean hyphenated slug."""
-    # Keep only the first line (model sometimes adds explanation after a newline)
     first_line = raw.splitlines()[0]
     slug = re.sub(r"[^a-z0-9]+", "-", first_line.lower()).strip("-")
-    # Strip filler words so meaningful words aren't crowded out by the char limit
     words = [w for w in slug.split("-") if w and w not in _FILLERS]
     slug = "-".join(words)
-    # Trim to 60 chars without cutting a word in half
     if len(slug) > 60:
         slug = slug[:61].rsplit("-", 1)[0]
     return slug
@@ -126,21 +214,59 @@ def _looks_bad(slug: str) -> bool:
     return (
         not slug
         or any(slug.startswith(p) for p in _BAD_PREFIXES)
-        or slug.count("-") > 7  # more than 8 words → probably a sentence
+        or slug.count("-") > 7
         or bool(words & _BAD_WORDS)
     )
 
 
-def describe_image(path: Path, model: str) -> str:
-    """Ask the vision model for a short slug description of the image."""
+# ── Main pipeline ─────────────────────────────────────────────────────────────
+
+
+def describe_image(
+    path: Path,
+    vision_model: str,
+    text_model: str,
+    use_ocr: bool,
+    verbose: bool,
+) -> str:
+    """Three-stage pipeline: vision description + OCR → text LLM → slug."""
     with open(path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode()
 
-    slug = _to_slug(_call_ollama(b64, model, MAIN_PROMPT))
+    # Stage 1: vision description
+    visual_desc = _call_vision(b64, vision_model, VISION_PROMPT, VISION_SYSTEM)
+    if verbose:
+        print(f"    [vision] {visual_desc}")
+
+    # Stage 2: OCR
+    ocr_text = ""
+    if use_ocr:
+        ocr_text = extract_text_ocr(path)
+        if verbose:
+            if ocr_text:
+                preview = ocr_text[:120] + ("…" if len(ocr_text) > 120 else "")
+                print(f"    [ocr]    {preview}")
+            else:
+                print("    [ocr]    (nothing extracted)")
+
+    # Stage 3: synthesize into slug
+    synthesis_prompt = SYNTHESIS_PROMPT_TMPL.format(
+        visual=visual_desc or "(no description)",
+        ocr=ocr_text or "(none)",
+    )
+    raw_slug = _call_text(text_model, synthesis_prompt, SYNTHESIS_SYSTEM)
+    slug = _to_slug(raw_slug)
+    if verbose:
+        print(f"    [slug]   {slug}")
 
     if _looks_bad(slug):
-        # One retry with a stripped-down prompt
-        slug = _to_slug(_call_ollama(b64, model, FALLBACK_PROMPT))
+        # Fallback: ask vision model directly for a slug
+        if verbose:
+            print("    [slug]   looks bad, retrying with fallback…")
+        raw_slug = _call_vision(b64, vision_model, FALLBACK_PROMPT, FALLBACK_SYSTEM)
+        slug = _to_slug(raw_slug)
+        if verbose:
+            print(f"    [slug]   {slug} (fallback)")
 
     return slug or "untitled"
 
@@ -186,7 +312,7 @@ def main():
         description="Rename and archive screenshots using a local vision model."
     )
     parser.add_argument(
-        "--incoming",
+        "--inbox",
         required=True,
         metavar="DIR",
         help="Folder where new screenshots land (inbox).",
@@ -199,9 +325,20 @@ def main():
     )
     parser.add_argument(
         "--model",
-        default="llava",
+        default="llama3.2-vision:11b",
         metavar="MODEL",
-        help="Ollama vision model to use (default: llava).",
+        help="Ollama vision model (default: llama3.2-vision:11b).",
+    )
+    parser.add_argument(
+        "--text-model",
+        default=None,
+        metavar="MODEL",
+        help="Ollama text model for slug synthesis (default: same as --model).",
+    )
+    parser.add_argument(
+        "--no-ocr",
+        action="store_true",
+        help="Skip Tesseract OCR (useful if tesseract is not installed).",
     )
     parser.add_argument(
         "--dry-run",
@@ -211,25 +348,31 @@ def main():
     parser.add_argument(
         "--keep-originals",
         action="store_true",
-        help=(
-            "Keep original files in an incoming/processed/ subfolder "
-            "instead of removing them after archiving."
-        ),
+        help="Keep originals in inbox/processed/ instead of removing them.",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print vision description, OCR output, and slug for each image.",
     )
     args = parser.parse_args()
 
-    incoming = Path(args.incoming).expanduser().resolve()
+    vision_model = args.model
+    text_model = args.text_model or args.model
+    use_ocr = not args.no_ocr
+
+    inbox = Path(args.inbox).expanduser().resolve()
     archive = Path(args.archive).expanduser().resolve()
-    processed = incoming / "processed"
+    processed = inbox / "processed"
 
     if not args.dry_run:
         archive.mkdir(parents=True, exist_ok=True)
-        incoming.mkdir(parents=True, exist_ok=True)
+        inbox.mkdir(parents=True, exist_ok=True)
         if args.keep_originals:
             processed.mkdir(parents=True, exist_ok=True)
 
     images = sorted(
-        f for f in incoming.iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTS
+        f for f in inbox.iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTS
     )
 
     if not images:
@@ -239,7 +382,11 @@ def main():
     if args.dry_run:
         print("[dry-run] No files will be moved.\n")
 
-    # Start Ollama only if it isn't already running
+    print(f"Vision model : {vision_model}")
+    print(f"Text model   : {text_model}")
+    print(f"OCR          : {'enabled (eng+deu)' if use_ocr else 'disabled'}")
+    print()
+
     already_running = ollama_ready()
     ollama_proc = None
     if not already_running:
@@ -255,12 +402,14 @@ def main():
             return
 
     try:
-        print(f"Processing {len(images)} image(s) with {args.model}…\n")
+        print(f"Processing {len(images)} image(s)…\n")
         for img in images:
             print(f"  {img.name}")
             try:
                 date = extract_date(img)
-                slug = describe_image(img, args.model)
+                slug = describe_image(
+                    img, vision_model, text_model, use_ocr, args.verbose
+                )
                 dest = unique_dest(archive, f"{date}_{slug}", img.suffix.lower())
                 if args.dry_run:
                     print(f"  → {dest.name}  [dry-run, not moved]\n")

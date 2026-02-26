@@ -6,10 +6,12 @@
 #   bash install.sh
 #
 # What it does:
-#   1. Checks for Ollama and the vision model; offers to install them.
-#   2. Asks where your screenshot inbox and archive folders are.
-#   3. Asks for a schedule (daily or weekly).
-#   4. Generates and installs a macOS LaunchAgent that runs the sorter
+#   1. Checks for Ollama and Tesseract; offers to install them via Homebrew.
+#   2. Asks which vision model to use and pulls it if not already present.
+#   3. Optionally asks for a separate text model for the synthesis step.
+#   4. Asks where your screenshot inbox and archive folders are.
+#   5. Asks for a schedule (daily or weekly).
+#   6. Generates and installs a macOS LaunchAgent that runs the sorter
 #      automatically on that schedule.
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -19,7 +21,7 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT_PATH="$REPO_DIR/sort_screenshots.py"
 PLIST_LABEL="com.screenshot-sorter"
 PLIST_DST="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
-DEFAULT_MODEL="llava"
+DEFAULT_MODEL="llama3.2-vision:11b"
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -75,32 +77,58 @@ else
     fi
 fi
 
-# ── 3. Vision model ───────────────────────────────────────────────────────────
+# ── 3. Tesseract ──────────────────────────────────────────────────────────────
 
-MODEL=$(ask "  Vision model to use" "$DEFAULT_MODEL")
-
-# If the user chose llava (with or without a tag), offer a version picker
-if [[ "$MODEL" == "llava" || "$MODEL" == llava:* ]]; then
-    echo
-    echo "  Which LLaVA variant would you like?"
-    echo "    1) llava:7b   ~4.7 GB  fast, good for most screenshots"
-    echo "    2) llava:13b  ~8.0 GB  better descriptions, slower"
-    echo "    3) llava:34b  ~20  GB  best quality, needs ≥32 GB RAM"
-    echo "    4) llava-phi3 ~2.9 GB  lightweight (Phi-3 base)"
-    echo "    5) Keep '$MODEL' as entered"
-    read -r -p "  Choice [1]: " LLAVA_CHOICE
-    case "${LLAVA_CHOICE:-1}" in
-        2) MODEL="llava:13b" ;;
-        3) MODEL="llava:34b" ;;
-        4) MODEL="llava-phi3" ;;
-        5) ;;   # leave MODEL unchanged
-        *) MODEL="llava:7b" ;;
-    esac
-    echo "  Using model: $MODEL"
+OCR_ENABLED=true
+if command -v tesseract &>/dev/null; then
+    echo "✓ Tesseract: $(tesseract --version 2>&1 | head -1)"
+    # Warn if the German language data is missing
+    if ! tesseract --list-langs 2>/dev/null | grep -q "^deu$"; then
+        echo "  ⚠ German language data not found."
+        echo "  Run: brew install tesseract-lang   (or set TESSDATA_PREFIX manually)"
+        echo "  OCR will fall back to English only until deu is available."
+    fi
+else
+    echo "✗ Tesseract not found."
+    if confirm "  Install Tesseract (+ language packs) via Homebrew?"; then
+        if ! command -v brew &>/dev/null; then
+            echo "  Homebrew not found. Install it from https://brew.sh, then re-run."
+            exit 1
+        fi
+        brew install tesseract tesseract-lang
+        echo "✓ Tesseract installed."
+    else
+        echo "  Skipping. OCR will be disabled (--no-ocr) in the LaunchAgent."
+        OCR_ENABLED=false
+    fi
 fi
 
-# Check if the model is already pulled (requires ollama to not be serving yet;
-# `ollama list` works without the server running on newer versions)
+separator
+
+# ── 4. Vision model ───────────────────────────────────────────────────────────
+
+echo "Which vision model should describe screenshots?"
+echo
+echo "  1) llama3.2-vision:11b  ~8 GB  (default) — strong descriptions and text reading"
+echo "  2) llava:7b              ~4.7 GB           — lighter alternative"
+echo "  3) llava:13b             ~8.0 GB           — LLaVA at similar size"
+echo "  4) llava-phi3            ~2.9 GB           — lightweight"
+echo "  5) moondream             ~1.8 GB           — very fast, more generic names"
+echo "  6) Enter a custom model name"
+echo
+read -r -p "  Choice [1]: " MODEL_CHOICE
+
+case "${MODEL_CHOICE:-1}" in
+    2) MODEL="llava:7b" ;;
+    3) MODEL="llava:13b" ;;
+    4) MODEL="llava-phi3" ;;
+    5) MODEL="moondream" ;;
+    6) MODEL=$(ask "  Model name" "$DEFAULT_MODEL") ;;
+    *) MODEL="$DEFAULT_MODEL" ;;
+esac
+echo "  Vision model: $MODEL"
+
+# Pull the vision model if not already available
 if ollama list 2>/dev/null | grep -q "^${MODEL}"; then
     echo "✓ Model '$MODEL' already available."
 else
@@ -115,32 +143,72 @@ fi
 
 separator
 
-# ── 4. Folders ────────────────────────────────────────────────────────────────
+# ── 5. Text model (optional) ──────────────────────────────────────────────────
+
+echo "The vision model also handles slug synthesis by default."
+echo "A smaller text-only model is faster and equally capable for this step."
+echo
+TEXT_MODEL=""
+if confirm "  Use a separate text model for slug synthesis?"; then
+    echo
+    echo "  Suggested options:"
+    echo "    1) llama3.2:3b   ~2 GB  — fast, good quality"
+    echo "    2) mistral       ~4 GB  — reliable instruction follower"
+    echo "    3) gemma3:4b     ~3 GB  — good alternative"
+    echo "    4) Enter a custom model name"
+    echo
+    read -r -p "  Choice [1]: " TEXT_CHOICE
+    case "${TEXT_CHOICE:-1}" in
+        2) TEXT_MODEL="mistral" ;;
+        3) TEXT_MODEL="gemma3:4b" ;;
+        4) TEXT_MODEL=$(ask "  Text model name" "llama3.2:3b") ;;
+        *) TEXT_MODEL="llama3.2:3b" ;;
+    esac
+    echo "  Text model: $TEXT_MODEL"
+
+    if ollama list 2>/dev/null | grep -q "^${TEXT_MODEL}"; then
+        echo "✓ Model '$TEXT_MODEL' already available."
+    else
+        echo "  Model '$TEXT_MODEL' not found locally."
+        if confirm "  Pull '$TEXT_MODEL' now?"; then
+            ollama pull "$TEXT_MODEL"
+            echo "✓ Model '$TEXT_MODEL' ready."
+        else
+            echo "  Skipping pull. Run 'ollama pull $TEXT_MODEL' before using the sorter."
+        fi
+    fi
+else
+    echo "  Using '$MODEL' for synthesis as well."
+fi
+
+separator
+
+# ── 6. Folders ────────────────────────────────────────────────────────────────
 
 echo "Where should screenshots land before sorting (the inbox)?"
-INCOMING=$(ask "  Inbox folder" "$HOME/Pictures/Screenshots/incoming")
-INCOMING="${INCOMING/#\~/$HOME}"   # expand ~ manually for reliability
+INBOX=$(ask "  Inbox folder" "$HOME/Pictures/Screenshots/inbox")
+INBOX="${INBOX/#\~/$HOME}"   # expand ~ manually for reliability
 
 echo
 echo "Where should sorted screenshots be archived?"
 ARCHIVE=$(ask "  Archive folder" "$HOME/Pictures/Screenshots")
 ARCHIVE="${ARCHIVE/#\~/$HOME}"
 
-mkdir -p "$INCOMING" "$ARCHIVE"
+mkdir -p "$INBOX" "$ARCHIVE"
 echo
-echo "✓ Inbox:   $INCOMING"
+echo "✓ Inbox:   $INBOX"
 echo "✓ Archive: $ARCHIVE"
 
 echo
 KEEP_ORIGINALS=false
-if confirm "  Keep originals in $INCOMING/processed/ after archiving?"; then
+if confirm "  Keep originals in $INBOX/processed/ after archiving?"; then
     KEEP_ORIGINALS=true
-    echo "✓ Originals will be moved to $INCOMING/processed/"
+    echo "✓ Originals will be moved to $INBOX/processed/"
 fi
 
 separator
 
-# ── 5. Schedule ───────────────────────────────────────────────────────────────
+# ── 7. Schedule ───────────────────────────────────────────────────────────────
 
 echo "How often should the sorter run?"
 echo "  1) Daily"
@@ -174,11 +242,27 @@ fi
 
 separator
 
-# ── 6. Generate and install the LaunchAgent plist ─────────────────────────────
+# ── 8. Generate and install the LaunchAgent plist ─────────────────────────────
 
 LOG_FILE="$ARCHIVE/sorter.log"
 
 mkdir -p "$HOME/Library/LaunchAgents"
+
+# Build optional argument lines for the plist
+PLIST_EXTRA_ARGS=""
+if [[ -n "$TEXT_MODEL" ]]; then
+    PLIST_EXTRA_ARGS="$PLIST_EXTRA_ARGS
+        <string>--text-model</string>
+        <string>$TEXT_MODEL</string>"
+fi
+if ! $OCR_ENABLED; then
+    PLIST_EXTRA_ARGS="$PLIST_EXTRA_ARGS
+        <string>--no-ocr</string>"
+fi
+if $KEEP_ORIGINALS; then
+    PLIST_EXTRA_ARGS="$PLIST_EXTRA_ARGS
+        <string>--keep-originals</string>"
+fi
 
 cat > "$PLIST_DST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -194,13 +278,12 @@ cat > "$PLIST_DST" <<EOF
     <array>
         <string>$PYTHON</string>
         <string>$SCRIPT_PATH</string>
-        <string>--incoming</string>
-        <string>$INCOMING</string>
+        <string>--inbox</string>
+        <string>$INBOX</string>
         <string>--archive</string>
         <string>$ARCHIVE</string>
         <string>--model</string>
-        <string>$MODEL</string>
-$(if $KEEP_ORIGINALS; then echo "        <string>--keep-originals</string>"; fi)
+        <string>$MODEL</string>$PLIST_EXTRA_ARGS
     </array>
 
 $SCHEDULE_XML
@@ -227,24 +310,38 @@ echo "  Log:      $LOG_FILE"
 
 separator
 
-# ── 7. macOS screenshot save location reminder ────────────────────────────────
+# ── 9. macOS screenshot save location reminder ────────────────────────────────
 
 echo "One manual step: point macOS screenshots to your inbox."
 echo
 echo "  macOS 14+:  Settings → Keyboard → Keyboard Shortcuts → Screenshots"
 echo "              (or open the Screenshot app → Options → Save to)"
-echo "  Set 'Save to' →  $INCOMING"
+echo "  Set 'Save to' →  $INBOX"
 echo
 
 separator
 
+# ── 10. Summary and manual command ────────────────────────────────────────────
+
 echo "Done! To run the sorter manually at any time:"
 echo
-MANUAL_CMD="  python3 \"$SCRIPT_PATH\" \\"$'\n'"    --incoming \"$INCOMING\" \\"$'\n'"    --archive  \"$ARCHIVE\" \\"$'\n'"    --model    \"$MODEL\""
+MANUAL_CMD="  python3 \"$SCRIPT_PATH\" \\
+    --inbox \"$INBOX\" \\
+    --archive  \"$ARCHIVE\" \\
+    --model    \"$MODEL\""
+if [[ -n "$TEXT_MODEL" ]]; then
+    MANUAL_CMD="$MANUAL_CMD \\
+    --text-model \"$TEXT_MODEL\""
+fi
+if ! $OCR_ENABLED; then
+    MANUAL_CMD="$MANUAL_CMD \\
+    --no-ocr"
+fi
 if $KEEP_ORIGINALS; then
-    MANUAL_CMD="$MANUAL_CMD \\"$'\n'"    --keep-originals"
+    MANUAL_CMD="$MANUAL_CMD \\
+    --keep-originals"
 fi
 echo "$MANUAL_CMD"
 echo
-echo "Add --dry-run to preview renames without moving any files."
+echo "Add --dry-run --verbose to preview renames and inspect each pipeline stage."
 echo
