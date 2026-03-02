@@ -1,0 +1,18 @@
+[project]
+name = "contact"
+version = "0.1.0"
+dependencies = [
+    "streamlit>=1.35",
+    "pillow",
+]
+
+[project.scripts]
+contact = "contact:main"
+contact-ui = "contact_ui:run"
+
+[tool.hatch.build.targets.wheel]
+packages = ["processor", "contact.py", "contact_ui.py", "app.py"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

@@ -1,6 +1,8 @@
 # contact
 
-AI-powered tagger for analog film scans. Set up a roll, point it at a folder of scans, and it generates descriptions, tags, and categories for each frame — writing XMP sidecars and a browsable HTML contact sheet.
+<img src="docs/contact.png" width="400" alt="contact screenshot">
+
+AI-powered tagger for analog film scans. Set up a roll, point it at a folder of scans, and it generates descriptions, tags, and categories for each frame, writing XMP sidecar files and creating a browsable HTML contact sheet.
 
 ---
 
@@ -13,54 +15,91 @@ AI-powered tagger for analog film scans. Set up a roll, point it at a folder of 
 ollama pull llama3.2-vision:11b
 ```
 
-No other dependencies.
-
 ---
 
-## Usage
+## Install
 
 ```bash
-# Set up a roll, then tag it
-python3 contact.py --init ~/scans/tuscany/
-
-# Tag without setting up first
-python3 contact.py ~/scans/tuscany/
-
-# Multiple rolls at once — pass several folders, or a parent folder
-python3 contact.py --init ~/scans/2024/
-python3 contact.py ~/scans/2024/
-
-# Other flags
-python3 contact.py ~/scans/tuscany/ --dry-run    # preview without writing
-python3 contact.py ~/scans/tuscany/ --force      # re-tag already-tagged images
-python3 contact.py ~/scans/tuscany/ --verbose    # show full AI output per frame
+uv tool install .
 ```
+
+This installs two commands: `contact` (CLI) and `contact-ui` (Streamlit app).
 
 ---
 
-## Roll setup (`--init`)
+## Streamlit UI
 
-An interactive prompt for roll-level metadata:
+```bash
+contact-ui
+# or with a folder pre-loaded:
+contact-ui --folder ~/scans/tuscany/
+```
 
-- **Film stock, camera** — pick from a numbered list of suggestions, or type your own
-- **Lenses, locations, subjects** — toggle from previous entries, add new ones; multiple values allowed
-- **Lab, lab instructions, date, notes** — free text
-- **Label** *(optional)* — a short name for the roll used as the contact sheet title and folder suffix (e.g. `Oslo Summer 2024` → `2024-06_oslo-summer-2024`)
+A guided 5-step flow:
 
-Everything is saved to a `roll.yaml` in the scan folder and used to label the XMP files and HTML index. Previous entries are remembered and suggested the next time.
+1. **Select Folder** — type or browse to a folder of scans
+2. **Roll Info** — describe the roll: film stock, camera, lens, date, location, lab
+3. **Frame Analysis** — AI-tag images; select which ones to process, choose models
+4. **Review & Edit** — inspect and correct the AI-generated metadata frame by frame
+5. **Contact Sheet** — open or rebuild the HTML contact sheet
+
+---
+
+## CLI
+
+```bash
+# Set up a roll interactively, then tag it
+contact --init ~/scans/tuscany/
+
+# Tag without setup
+contact ~/scans/tuscany/
+
+# Multiple rolls — pass several folders or a parent folder
+contact --init ~/scans/2024/
+contact ~/scans/2024/
+
+# Common flags
+contact ~/scans/tuscany/ --dry-run    # preview without writing
+contact ~/scans/tuscany/ --force      # re-tag already-tagged images
+contact ~/scans/tuscany/ --verbose    # show full AI output per frame
+```
+
+### Options
+
+| Flag | Description |
+|---|---|
+| `--init` | Run interactive roll setup |
+| `--model MODEL` | Vision model (default: `llama3.2-vision:11b`) |
+| `--text-model MODEL` | Separate model for the synthesis stage |
+| `--dry-run` | Preview without writing any files |
+| `--force` | Re-tag images that already have a sidecar |
+| `--verbose` | Print full AI output for each frame |
+| `--no-rename-folder` | Skip renaming the folder after processing |
+
+---
+
+## Roll setup
+
+Roll-level metadata is saved to `roll.yaml` in the scan folder:
+
+- **Film stock, camera** — pick from suggestions or type your own
+- **Lenses, locations, subjects** — multiple values allowed; previous entries are suggested
+- **Lab, lab notes, date, notes** — free text
+- **Label** — short name used as the contact sheet title (e.g. `Oslo Summer 2024`)
+
+History is remembered across sessions in `~/.config/contact/history.json`.
 
 ---
 
 ## Output
 
-**XMP sidecars** (one per image, written alongside the scan) contain the AI-generated description, tags, and category, plus roll metadata. Readable by Lightroom, darktable, Finder, and Spotlight.
+**XMP sidecars** (one per image) contain the AI-generated description, tags, and category, plus roll metadata. Readable by Lightroom, darktable, Finder, and Spotlight.
 
 **`index.html`** — a self-contained contact sheet with:
-- Images at natural aspect ratio in a fluid masonry grid
-- Roll metadata displayed as a compact monospace key/value block (date, film, camera, lens, location, lab); AI summary collapsible inline
+- Image overview and lightbox
+- Roll metadata
 - Full-text search across descriptions, tags, filenames, and categories (`/` or `Enter` to focus)
-- Lightbox view with frame metadata; navigate with arrow keys or `j`/`k`
-- Star any frame to pin it to the top
+- Star frames to pin them to the top
 
 ---
 
@@ -69,20 +108,30 @@ Everything is saved to a `roll.yaml` in the scan folder and used to label the XM
 Each frame goes through two stages:
 
 1. A vision model describes what is physically visible in the image
-2. A text model turns that description into a category, up to 12 tags, and a 2–3 sentence description
+2. A text model turns that into a category, up to 12 tags, and a 2–3 sentence description
 
-Roll metadata (gear, location, subjects) is kept out of the tagging stage to prevent the model from guessing at things it can't see. After all frames are processed, a short summary of the whole roll is generated and added to the HTML index.
+Roll metadata (gear, location, subjects) is kept out of the tagging stage to prevent the model from guessing at things it can't see. After all frames are processed, a short summary of the whole roll is written to the HTML index.
+
+## Try it out
+
+A sample roll is included at `example/sample-roll/`. It has pre-tagged images, XMP sidecars, and a rendered `index.html` so you can see the output without running any models:
+
+```bash
+# Open the contact sheet directly
+open example/sample-roll/index.html
+
+# Or load it in the UI (read-only — no Ollama needed to browse)
+contact-ui --folder example/sample-roll/
+```
+
+To re-process it from scratch:
+
+```bash
+contact example/sample-roll/ --force
+```
 
 ---
 
-## Options
+## Limitations
 
-| Flag | Description |
-|---|---|
-| `--init` | Run roll setup |
-| `--model MODEL` | Vision model (default: `llama3.2-vision:11b`) |
-| `--text-model MODEL` | Separate model for the synthesis stage |
-| `--dry-run` | Preview without writing any files |
-| `--force` | Re-tag images that already have a sidecar |
-| `--verbose` | Print full AI output for each frame |
-| `--no-rename-folder` | Skip renaming the folder after processing |
+The AI model runs locally, which I prefer for privacy, bandwidth and cost. But the smaller model also comes with limitations. Sometimes descriptions and tags are off. You can use the UI version to review and edit metadata, or just roll with the AI errors. If you have a computer with lots of RAM, feel free to load a bigger vision model and/or a separate text model for text synthesis.
