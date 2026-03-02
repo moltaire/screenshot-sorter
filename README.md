@@ -35,13 +35,14 @@ contact-ui
 contact-ui --folder ~/scans/tuscany/
 ```
 
-A guided 5-step flow:
+A guided 4-step flow:
 
 1. **Select Folder** — type or browse to a folder of scans
 2. **Roll Info** — describe the roll: film stock, camera, lens, date, location, lab
 3. **Frame Analysis** — AI-tag images; select which ones to process, choose models
-4. **Review & Edit** — inspect and correct the AI-generated metadata frame by frame
-5. **Contact Sheet** — open or rebuild the HTML contact sheet
+4. **Review & Edit** — inspect and correct the AI-generated metadata frame by frame.
+
+After review, the **contact** sheet is generated.
 
 ---
 
@@ -110,7 +111,7 @@ Each frame goes through two stages:
 1. A vision model describes what is physically visible in the image
 2. A text model turns that into a category, up to 12 tags, and a 2–3 sentence description
 
-Roll metadata (gear, location, subjects) is kept out of the tagging stage to prevent the model from guessing at things it can't see. After all frames are processed, a short summary of the whole roll is written to the HTML index.
+After all frames are processed, a short summary of the whole roll is written to the HTML index.
 
 ## Try it out
 
